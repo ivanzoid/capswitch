@@ -7,119 +7,105 @@
  * Implemented as global keyboard hook.
  */
 
-#include "stdafx.h"
-#include "CapSwitch.h"
-#include "Hook/Hook.h"
+#pragma comment(linker,"/NODEFAULTLIB")
+#pragma comment(linker,"/ENTRY:WinMain")
 
-#define CAPSWITCH_CLASS_NAME L"CapSwitchClass"
-#define CAPSWITCH_WINDOW_NAME L"CapSwitch"
+#define WINVER 0x0500
+#define _WIN32_WINNT 0x0500
+#define WIN32_LEAN_AND_MEAN
 
-LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+#include <Windows.h>
 
-int WINAPI WinMain(
-    HINSTANCE hInstance,
-    HINSTANCE hPrevInstance,
-    LPSTR lpCmdLine,
-    int nCmdShow)
+#define HIGH_BIT_SET 0x8000
+#define LOW_BIT_SET 0x0001
+
+HHOOK hKbHook = NULL;
+
+void CancelCapsOnWindow(HWND hWnd)
 {
-    int retval = 0;
-    HWND hWnd = 0;
-
-    try {
-
-        // Register the window class for hidden window.
-
-        WNDCLASSEX wcx; 
-
-        wcx.cbSize = sizeof(wcx);
-        wcx.style = 0;
-        wcx.lpfnWndProc = WndProc;
-        wcx.cbClsExtra = 0;
-        wcx.cbWndExtra = 0;
-        wcx.hInstance = hInstance;
-        wcx.hIcon = NULL;
-        wcx.hCursor = NULL;
-        wcx.hbrBackground = NULL;
-        wcx.lpszMenuName =  NULL;
-        wcx.lpszClassName = CAPSWITCH_CLASS_NAME;
-        wcx.hIconSm = NULL;
-     
-        if (RegisterClassEx(&wcx) == NULL) {
-            throw 1;
-        }
-
-        // Create hidden window.
-
-        hWnd = CreateWindow( 
-            CAPSWITCH_CLASS_NAME,
-            CAPSWITCH_WINDOW_NAME,
-            0,                   // hidden window
-            0, 0, 0, 0,
-            (HWND) NULL,         // no owner window 
-            (HMENU) NULL,        // use class menu 
-            hInstance,
-            (LPVOID) NULL);      // no window-creation data 
-
-        if (hWnd == NULL) {
-            throw 2;
-        }
-
-        HMODULE hDll = GetModuleHandle(L"Hook.dll");
-
-        if (hDll == NULL) {
-            throw 3;
-        }
-
-        if (KbHookInit(hWnd, hDll) == false) {
-            throw 4;
-        }
-
-        // Message loop.
-
-        MSG msg;
-
-        while (GetMessage(&msg, NULL, 0, 0) != 0) {
-            DispatchMessage(&msg);
-        }
-    }
-
-    catch (int err) {
-        retval = err;
-    }
-
-    KbHookShutdown();
-    DestroyWindow(hWnd);
-    UnregisterClass(CAPSWITCH_CLASS_NAME, hInstance);
-
-    return retval;
+	PostMessage(hWnd, WM_KEYUP, 20, 0);
+	PostMessage(hWnd, WM_KEYDOWN, 20, 0);
+	PostMessage(hWnd, WM_KEYUP, 20, 0);
 }
 
-int ScanCode(LPARAM lParam)
+void ToggleCapsLock()
 {
-    return (lParam << 8) >> 24;
+	keybd_event(
+		VK_CAPITAL,
+		0xFF,
+		KEYEVENTF_EXTENDEDKEY,
+		0);
+
+	keybd_event(
+		VK_CAPITAL,
+		0xFF,
+		KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP,
+		0);
 }
 
-LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+LRESULT CALLBACK LlKbHookFn(int code, WPARAM wParam, LPARAM lParam)
 {
-    static bool debug = false;
+	if (code < 0 || code != HC_ACTION)
+    {
+		return CallNextHookEx(hKbHook, code, wParam, lParam);
+	}
 
-    if (uMsg == WM_CAPSWITCH_LOCALE_CHANGE) {
-        if (debug) {
-            wchar_t buf[30];
-            wsprintf(buf, L"LocaleChange  prev=%d\n", wParam);
-            OutputDebugString(buf);
-        }
-    } else if (uMsg == WM_CAPSWITCH_DEBUG) {
-        if (debug) {
-            wchar_t buf[50];
-            wsprintf(buf, L"w=%d  l=%d  scan=%d\n", wParam, lParam, ScanCode(lParam));
-            OutputDebugString(buf);
-        }
-    } else if (uMsg == WM_DESTROY) {
-        PostQuitMessage(0);
-    } else {
-        return DefWindowProc(hWnd, uMsg, wParam, lParam);
-    }
+	if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN)
+	{
+		KBDLLHOOKSTRUCT *kbDllHookStruct = (KBDLLHOOKSTRUCT *)lParam;
 
-    return 0;
+		//wchar_t buf[100];
+		//wsprintf(buf, L"w=%d scan=%u vk=%u flags=%u extra=%u\n", wParam, kbDllHookStruct->scanCode, kbDllHookStruct->vkCode, kbDllHookStruct->flags, kbDllHookStruct->dwExtraInfo);
+		//OutputDebugString(buf);
+
+		int scanCode = kbDllHookStruct->scanCode;
+
+		if (scanCode == 54) // RSHIFT
+		{ 
+			if (GetKeyState(VK_LSHIFT) & HIGH_BIT_SET)
+			{
+				ToggleCapsLock();
+				return 1;
+			}
+		}
+		else if (scanCode == 42) // LSHIFT
+		{ 
+			if (GetKeyState(VK_RSHIFT) & HIGH_BIT_SET)
+			{
+				ToggleCapsLock();
+				return 1;
+			}
+		}
+		else if (scanCode == 58) // CAPSLOCK
+		{
+			HWND hWnd = GetForegroundWindow();
+			PostMessage(hWnd, WM_INPUTLANGCHANGEREQUEST, INPUTLANGCHANGE_FORWARD, 0);
+			CancelCapsOnWindow(hWnd);
+			return 1;
+		}
+	}
+
+	return CallNextHookEx(hKbHook, code, wParam, lParam);
 }
+
+int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
+{
+	hKbHook = SetWindowsHookEx(WH_KEYBOARD_LL, LlKbHookFn, NULL, 0);
+
+	if (hKbHook == NULL)
+	{
+		return 1;
+	}
+
+	MSG msg;
+
+	while (GetMessage(&msg, NULL, 0, 0) != 0)
+	{
+		DispatchMessage(&msg);
+	}
+
+	UnhookWindowsHookEx(hKbHook);
+
+	return 0;
+}
+
